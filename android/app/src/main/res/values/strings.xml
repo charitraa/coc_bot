@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">Allows CoC Upgrade Bot to read the Clash of Clans screen and tap suggested upgrades automatically.</string>
+</resources>
