@@ -41,6 +41,10 @@ class CocBotAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var botStep = BotStep.IDLE
 
+    // How many more suggested-upgrade-and-confirm cycles to run this session —
+    // one per free builder, decremented after each confirmed upgrade.
+    private var remainingUpgrades = 0
+
     enum class BotStep {
         IDLE,
         WAIT_FOR_COC,
@@ -48,6 +52,7 @@ class CocBotAccessibilityService : AccessibilityService() {
         TAP_BUILDER_BADGE,
         TAP_SUGGESTED_UPGRADE,
         TAP_UPGRADE_BUTTON,
+        TAP_CONFIRM_BUTTON,
         DONE
     }
 
@@ -194,7 +199,8 @@ class CocBotAccessibilityService : AccessibilityService() {
             return
         }
 
-        log("🔨 Free builders: $free/$max — opening builder panel")
+        log("🔨 Free builders: $free/$max — starting $free upgrade(s)")
+        remainingUpgrades = free
         botStep = BotStep.TAP_BUILDER_BADGE
         tapBuilderBadge()
     }
@@ -239,20 +245,54 @@ class CocBotAccessibilityService : AccessibilityService() {
     }
 
     // Tap the "Upgrade" button revealed at the bottom of the Builders panel
-    // after selecting a suggested upgrade, calibrated at ~65.4% width /
-    // ~84.7% height.
+    // after selecting a suggested upgrade, calibrated at ~57.8% width /
+    // ~81.9% height.
     private fun tapUpgradeButton() {
         if (!isRunning) return
         val display = resources.displayMetrics
-        val x = display.widthPixels * 0.6537f
-        val y = display.heightPixels * 0.8472f
+        val x = display.widthPixels * 0.578f
+        val y = display.heightPixels * 0.819f
 
         log("👆 Tapping Upgrade button at (${x.toInt()}, ${y.toInt()})")
         captureDebugScreenshot("upgrade_button", x, y)
         performTap(x, y) {
+            // Tapping "Upgrade" opens a "Upgrade X to Level Y?" confirmation
+            // dialog with a "Confirm" button — give it a moment to animate
+            // in, then tap "Confirm".
+            handler.postDelayed({
+                botStep = BotStep.TAP_CONFIRM_BUTTON
+                tapConfirmButton()
+            }, 1500)
+        }
+    }
+
+    // Tap the "Confirm" button on the "Upgrade X to Level Y?" dialog,
+    // calibrated at ~75.7% width / ~85.7% height.
+    private fun tapConfirmButton() {
+        if (!isRunning) return
+        val display = resources.displayMetrics
+        val x = display.widthPixels * 0.757f
+        val y = display.heightPixels * 0.857f
+
+        log("👆 Tapping Confirm button at (${x.toInt()}, ${y.toInt()})")
+        captureDebugScreenshot("confirm_button", x, y)
+        performTap(x, y) {
             upgradesStarted++
-            handler.postDelayed({ captureDebugScreenshot("upgrade_result") }, 1500)
-            handler.postDelayed({ closeCoc() }, 3500)
+            remainingUpgrades--
+            log("✅ Started upgrade #$upgradesStarted ($remainingUpgrades builder(s) left to assign)")
+            handler.postDelayed({ captureDebugScreenshot("confirm_result") }, 1500)
+
+            if (remainingUpgrades > 0) {
+                // Confirming closed the Builders panel and opened the
+                // upgraded building's info panel — re-tap the builder badge
+                // to bring the Builders panel back for the next builder.
+                handler.postDelayed({
+                    botStep = BotStep.TAP_BUILDER_BADGE
+                    tapBuilderBadge()
+                }, 2000)
+            } else {
+                handler.postDelayed({ closeCoc() }, 2000)
+            }
         }
     }
 
