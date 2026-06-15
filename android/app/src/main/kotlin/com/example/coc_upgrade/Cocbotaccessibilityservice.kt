@@ -317,21 +317,29 @@ class CocBotAccessibilityService : AccessibilityService() {
         }
     }
 
-    // Confirms the "Upgrade" button is actually showing where
-    // tapUpgradeButton() expects it before tapping it.
+    // Locates the "Upgrade" button among the row of action buttons revealed
+    // at the bottom of the panel after selecting a suggested upgrade, and
+    // taps it.
     //
-    // If "Suggested upgrades" has fewer items than free builders, the fixed
-    // tapFirstSuggestedUpgrade() coordinates can miss — landing on the
-    // "Other upgrades:" header, empty panel space, or even a building behind
-    // the panel (which can swap the whole screen to that building's info
-    // panel). In any of those cases no "Upgrade" button appears at the
-    // expected spot, so OCR that region first; if it's not there, stop the
-    // loop here instead of tapping blind coordinates on the live board.
+    // Most buildings show 3 action buttons (Info / Upgrade / Move), but some
+    // (Town Hall, Laboratory, Clan Castle, Army Camp, etc.) show 4-6
+    // (Rush Upgrade, Boost, Donate, Copy, ...), which shifts where "Upgrade"
+    // sits in the row — a fixed X coordinate calibrated for the 3-button
+    // case lands on the wrong button (or nothing) for those. Also, if
+    // "Suggested upgrades" has fewer items than free builders, the fixed
+    // tapFirstSuggestedUpgrade() coordinates can miss entirely — landing on
+    // the "Other upgrades:" header, empty panel space, or even a building
+    // behind the panel (which can swap the whole screen to that building's
+    // info panel, which has its own button row). So OCR the whole
+    // action-button row, find "Upgrade" by text, and tap exactly where it
+    // is; if it's not there at all, stop the loop here instead of tapping
+    // blind coordinates on the live board.
     private fun verifyUpgradeButtonAndProceed() {
         if (!isRunning) return
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            val display = resources.displayMetrics
             botStep = BotStep.TAP_UPGRADE_BUTTON
-            tapUpgradeButton()
+            tapUpgradeButton(display.widthPixels * 0.578f, display.heightPixels * 0.819f)
             return
         }
 
@@ -344,24 +352,38 @@ class CocBotAccessibilityService : AccessibilityService() {
                     return
                 }
 
-                // Generous box around the "Upgrade" button (~57.8%/81.9%).
-                val left = (full.width * 0.50f).toInt()
-                val right = (full.width * 0.66f).toInt()
-                val top = (full.height * 0.76f).toInt()
-                val bottom = (full.height * 0.88f).toInt()
-                val crop = Bitmap.createBitmap(full, left, top, right - left, bottom - top)
+                // The action-button row spans (close to) the full width —
+                // buildings with more buttons squeeze them into the same
+                // row rather than adding rows, so don't assume "Upgrade" is
+                // in any particular column. Vertically it sits around
+                // ~74%-90% height (the old 3-button calibration of ~81.9%
+                // falls in the middle of this band).
+                val top = (full.height * 0.74f).toInt()
+                val bottom = (full.height * 0.90f).toInt()
+                val crop = Bitmap.createBitmap(full, 0, top, full.width, bottom - top)
                 full.recycle()
 
                 val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
                 recognizer.process(InputImage.fromBitmap(crop, 0))
                     .addOnSuccessListener { visionText ->
-                        if (visionText.text.contains("Upgrade", ignoreCase = true)) {
-                            botStep = BotStep.TAP_UPGRADE_BUTTON
-                            tapUpgradeButton()
-                        } else {
+                        val lines = visionText.textBlocks
+                            .flatMap { it.lines }
+                            .mapNotNull { line -> line.boundingBox?.let { box -> line.text to box } }
+
+                        // Prefer an exact "Upgrade" label over a partial
+                        // match like "Rush Upgrade" (a different, gem-cost
+                        // button) or cost text mentioning "Upgrade".
+                        val upgradeLine = lines.firstOrNull { it.first.trim().equals("Upgrade", ignoreCase = true) }
+                            ?: lines.firstOrNull { it.first.contains("Upgrade", ignoreCase = true) }
+
+                        if (upgradeLine == null) {
                             log("⚠️ No 'Upgrade' button found (ran out of suggested upgrades?) — stopping with $remainingUpgrades builder(s) unassigned")
                             saveDebugBitmap("verify_upgrade_region", crop)
                             closeCoc()
+                        } else {
+                            val box = upgradeLine.second
+                            botStep = BotStep.TAP_UPGRADE_BUTTON
+                            tapUpgradeButton(box.exactCenterX(), top + box.exactCenterY())
                         }
                     }
                     .addOnFailureListener { e ->
@@ -380,14 +402,11 @@ class CocBotAccessibilityService : AccessibilityService() {
         })
     }
 
-    // Tap the "Upgrade" button revealed at the bottom of the Builders panel
-    // after selecting a suggested upgrade, calibrated at ~57.8% width /
-    // ~81.9% height.
-    private fun tapUpgradeButton() {
+    // Taps the "Upgrade" button at the given screenshot-pixel coordinates,
+    // located dynamically by verifyUpgradeButtonAndProceed() since its
+    // position shifts with how many action buttons a building shows.
+    private fun tapUpgradeButton(x: Float, y: Float) {
         if (!isRunning) return
-        val display = resources.displayMetrics
-        val x = display.widthPixels * 0.578f
-        val y = display.heightPixels * 0.819f
 
         log("👆 Tapping Upgrade button at (${x.toInt()}, ${y.toInt()})")
         captureDebugScreenshot("upgrade_button", x, y)
