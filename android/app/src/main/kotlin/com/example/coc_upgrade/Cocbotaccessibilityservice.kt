@@ -224,24 +224,160 @@ class CocBotAccessibilityService : AccessibilityService() {
     }
 
     // Tap the first item under "Suggested upgrades" in the Builders panel
-    // (e.g. "Spring Trap x2"), calibrated at ~49.5% width / ~33.2% height.
+    // (e.g. "Spring Trap x2" / "Air Bomb").
+    //
+    // The "Suggested upgrades:" section's vertical position isn't fixed — it
+    // shifts down by one row for every item listed under "Upgrades in
+    // progress:" above it, which grows as the loop confirms more upgrades.
+    // A hardcoded Y (the old ~33.2% height) only matched the very first
+    // iteration's layout; on later iterations it landed on the "Suggested
+    // upgrades:" header itself (non-interactive) instead of the first item.
+    // So OCR the panel to find the "Suggested upgrades" header line and tap
+    // directly below it — the X position stays fixed at ~49.5% width.
     private fun tapFirstSuggestedUpgrade() {
         if (!isRunning) return
-        val display = resources.displayMetrics
-        val x = display.widthPixels * 0.495f
-        val y = display.heightPixels * 0.332f
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            tapSuggestedUpgradeRow(resources.displayMetrics.heightPixels * 0.332f)
+            return
+        }
+
+        takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+            override fun onSuccess(result: ScreenshotResult) {
+                val full = bitmapFromScreenshot(result)
+                if (full == null) {
+                    log("⚠️ Could not read screenshot buffer — stopping")
+                    closeCoc()
+                    return
+                }
+
+                // Generous box around where the "Suggested upgrades:" list sits.
+                val left = (full.width * 0.35f).toInt()
+                val right = (full.width * 0.65f).toInt()
+                val top = (full.height * 0.08f).toInt()
+                val bottom = (full.height * 0.60f).toInt()
+                val crop = Bitmap.createBitmap(full, left, top, right - left, bottom - top)
+                full.recycle()
+
+                val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                recognizer.process(InputImage.fromBitmap(crop, 0))
+                    .addOnSuccessListener { visionText ->
+                        val lines = visionText.textBlocks
+                            .flatMap { it.lines }
+                            .mapNotNull { line -> line.boundingBox?.let { box -> line.text to box } }
+                            .sortedBy { it.second.top }
+
+                        val headerIndex = lines.indexOfFirst { it.first.contains("Suggested", ignoreCase = true) }
+                        // CoC's bold outlined font sometimes makes ML Kit emit a
+                        // second "line" for the header text itself, sitting at
+                        // (almost) the same Y as "Suggested upgrades:" — so
+                        // headerIndex + 1 can just be a duplicate of the header
+                        // rather than the first real item below it. Skip past
+                        // anything that still vertically overlaps the header's
+                        // own bounding box and take the first line clearly below it.
+                        val headerBox = lines.getOrNull(headerIndex)?.second
+                        val itemLine = headerBox?.let { hb ->
+                            lines.drop(headerIndex + 1).firstOrNull { (_, box) -> box.top >= hb.bottom }
+                        }
+                        if (itemLine == null) {
+                            log("⚠️ Could not find a 'Suggested upgrades' item — stopping with $remainingUpgrades builder(s) unassigned")
+                            closeCoc()
+                        } else {
+                            tapSuggestedUpgradeRow(top + itemLine.second.exactCenterY())
+                        }
+                    }
+                    .addOnFailureListener { e ->
+                        log("⚠️ OCR failed: ${e.message} — stopping")
+                        closeCoc()
+                    }
+                    .addOnCompleteListener {
+                        crop.recycle()
+                        recognizer.close()
+                    }
+            }
+            override fun onFailure(errorCode: Int) {
+                log("⚠️ Screenshot failed (code $errorCode) — stopping")
+                closeCoc()
+            }
+        })
+    }
+
+    // Taps the located "Suggested upgrades" row at the given Y
+    // (screenshot-pixel coordinates), at a fixed X (~49.5% width).
+    private fun tapSuggestedUpgradeRow(y: Float) {
+        if (!isRunning) return
+        val x = resources.displayMetrics.widthPixels * 0.495f
 
         log("👆 Tapping first suggested upgrade at (${x.toInt()}, ${y.toInt()})")
         captureDebugScreenshot("suggested_upgrade", x, y)
         performTap(x, y) {
             // Selecting the item reveals "Info"/"Upgrade" buttons at the
             // bottom of the panel — give the UI a moment to animate in, then
-            // tap "Upgrade".
-            handler.postDelayed({
-                botStep = BotStep.TAP_UPGRADE_BUTTON
-                tapUpgradeButton()
-            }, 1500)
+            // verify the "Upgrade" button actually appeared before tapping it.
+            handler.postDelayed({ verifyUpgradeButtonAndProceed() }, 1500)
         }
+    }
+
+    // Confirms the "Upgrade" button is actually showing where
+    // tapUpgradeButton() expects it before tapping it.
+    //
+    // If "Suggested upgrades" has fewer items than free builders, the fixed
+    // tapFirstSuggestedUpgrade() coordinates can miss — landing on the
+    // "Other upgrades:" header, empty panel space, or even a building behind
+    // the panel (which can swap the whole screen to that building's info
+    // panel). In any of those cases no "Upgrade" button appears at the
+    // expected spot, so OCR that region first; if it's not there, stop the
+    // loop here instead of tapping blind coordinates on the live board.
+    private fun verifyUpgradeButtonAndProceed() {
+        if (!isRunning) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            botStep = BotStep.TAP_UPGRADE_BUTTON
+            tapUpgradeButton()
+            return
+        }
+
+        takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+            override fun onSuccess(result: ScreenshotResult) {
+                val full = bitmapFromScreenshot(result)
+                if (full == null) {
+                    log("⚠️ Could not read screenshot buffer — stopping")
+                    closeCoc()
+                    return
+                }
+
+                // Generous box around the "Upgrade" button (~57.8%/81.9%).
+                val left = (full.width * 0.50f).toInt()
+                val right = (full.width * 0.66f).toInt()
+                val top = (full.height * 0.76f).toInt()
+                val bottom = (full.height * 0.88f).toInt()
+                val crop = Bitmap.createBitmap(full, left, top, right - left, bottom - top)
+                full.recycle()
+
+                val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                recognizer.process(InputImage.fromBitmap(crop, 0))
+                    .addOnSuccessListener { visionText ->
+                        if (visionText.text.contains("Upgrade", ignoreCase = true)) {
+                            botStep = BotStep.TAP_UPGRADE_BUTTON
+                            tapUpgradeButton()
+                        } else {
+                            log("⚠️ No 'Upgrade' button found (ran out of suggested upgrades?) — stopping with $remainingUpgrades builder(s) unassigned")
+                            saveDebugBitmap("verify_upgrade_region", crop)
+                            closeCoc()
+                        }
+                    }
+                    .addOnFailureListener { e ->
+                        log("⚠️ OCR failed: ${e.message} — stopping")
+                        closeCoc()
+                    }
+                    .addOnCompleteListener {
+                        crop.recycle()
+                        recognizer.close()
+                    }
+            }
+            override fun onFailure(errorCode: Int) {
+                log("⚠️ Screenshot failed (code $errorCode) — stopping")
+                closeCoc()
+            }
+        })
     }
 
     // Tap the "Upgrade" button revealed at the bottom of the Builders panel
