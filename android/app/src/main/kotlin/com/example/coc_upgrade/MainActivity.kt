@@ -1,9 +1,7 @@
 package com.example.coc_upgrade
 
-import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -15,7 +13,6 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
-import java.util.Calendar
 
 class MainActivity : FlutterActivity() {
 
@@ -141,38 +138,15 @@ class MainActivity : FlutterActivity() {
         startService(intent)
     }
 
-    // Schedule the bot using AlarmManager to fire at the given time daily
+    // Schedule the bot to fire at the given time daily. See
+    // BotAlarmReceiver.scheduleNext for why this uses an exact, self-
+    // rearming alarm instead of AlarmManager.setRepeating.
     private fun scheduleDailyBot(hour: Int, minute: Int) {
-        val alarmManager = getSystemService(ALARM_SERVICE) as AlarmManager
-        val intent = Intent(this, BotAlarmReceiver::class.java)
-        val pendingIntent = PendingIntent.getBroadcast(
-            this, 0, intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val cal = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, hour)
-            set(Calendar.MINUTE, minute)
-            set(Calendar.SECOND, 0)
-            if (before(Calendar.getInstance())) add(Calendar.DAY_OF_MONTH, 1)
-        }
-
-        alarmManager.setRepeating(
-            AlarmManager.RTC_WAKEUP,
-            cal.timeInMillis,
-            AlarmManager.INTERVAL_DAY,
-            pendingIntent
-        )
+        BotAlarmReceiver.scheduleNext(this, hour, minute)
     }
 
     private fun cancelSchedule() {
-        val alarmManager = getSystemService(ALARM_SERVICE) as AlarmManager
-        val intent = Intent(this, BotAlarmReceiver::class.java)
-        val pendingIntent = PendingIntent.getBroadcast(
-            this, 0, intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        alarmManager.cancel(pendingIntent)
+        BotAlarmReceiver.cancel(this)
     }
 
     private fun createNotificationChannel() {
