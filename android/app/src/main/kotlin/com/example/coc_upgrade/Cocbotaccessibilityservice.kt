@@ -250,11 +250,17 @@ class CocBotAccessibilityService : AccessibilityService() {
                     return
                 }
 
-                // Generous box around where the "Suggested upgrades:" list sits.
+                // Generous box around where the "Suggested upgrades:" list
+                // sits. The bottom needs to be tall enough that the header
+                // stays inside it even after "Upgrades in progress:" above
+                // it has grown by up to ~5 rows (one per builder assigned
+                // so far this run) — with 0 in-progress items the header
+                // sits around ~25-33% height, so +5 rows (~8% each) can push
+                // it down past 60%.
                 val left = (full.width * 0.35f).toInt()
                 val right = (full.width * 0.65f).toInt()
                 val top = (full.height * 0.08f).toInt()
-                val bottom = (full.height * 0.60f).toInt()
+                val bottom = (full.height * 0.85f).toInt()
                 val crop = Bitmap.createBitmap(full, left, top, right - left, bottom - top)
                 full.recycle()
 
@@ -266,17 +272,34 @@ class CocBotAccessibilityService : AccessibilityService() {
                             .mapNotNull { line -> line.boundingBox?.let { box -> line.text to box } }
                             .sortedBy { it.second.top }
 
-                        val headerIndex = lines.indexOfFirst { it.first.contains("Suggested", ignoreCase = true) }
-                        // CoC's bold outlined font sometimes makes ML Kit emit a
-                        // second "line" for the header text itself, sitting at
-                        // (almost) the same Y as "Suggested upgrades:" — so
-                        // headerIndex + 1 can just be a duplicate of the header
-                        // rather than the first real item below it. Skip past
-                        // anything that still vertically overlaps the header's
-                        // own bounding box and take the first line clearly below it.
-                        val headerBox = lines.getOrNull(headerIndex)?.second
-                        val itemLine = headerBox?.let { hb ->
-                            lines.drop(headerIndex + 1).firstOrNull { (_, box) -> box.top >= hb.bottom }
+                        for ((text, box) in lines) {
+                            Log.d("CocBot", "🔎 suggested-upgrades line: '$text' top=${box.top} bottom=${box.bottom}")
+                        }
+
+                        // CoC's bold outlined font makes ML Kit emit multiple
+                        // overlapping "lines" for the header text itself (fill +
+                        // outline), each at slightly different Y. Taking the
+                        // FIRST "Suggested" match's box as the boundary isn't
+                        // reliable if a LATER duplicate has a larger bottom — so
+                        // take the max bottom across ALL "Suggested" matches as
+                        // the header's true lower edge, then pick the first line
+                        // below that edge that isn't itself part of the header.
+                        val headerLines = lines.filter { it.first.contains("Suggested", ignoreCase = true) }
+                        val headerBottom = headerLines.maxOfOrNull { it.second.bottom }
+                        // The first line below the header isn't always the first
+                        // item's name — ML Kit sometimes picks up a stray
+                        // "10H 43M"-style countdown ghost (OCR'd as "1OH 43M")
+                        // sitting just under the header with nothing paired next
+                        // to it. Skip any line that, after normalizing O/I/l back
+                        // to 0/1, is made up entirely of digits/whitespace and
+                        // duration-unit letters (d/h/m) — building/troop names
+                        // always contain other letters and won't match this.
+                        val durationLike = Regex("^[0-9OoIl\\sdDhHmM]+$")
+                        val itemLine = headerBottom?.let { hb ->
+                            lines.firstOrNull { (text, box) ->
+                                val t = text.trim()
+                                box.top >= hb && !t.contains("Suggested", ignoreCase = true) && !durationLike.matches(t)
+                            }
                         }
                         if (itemLine == null) {
                             log("⚠️ Could not find a 'Suggested upgrades' item — stopping with $remainingUpgrades builder(s) unassigned")
